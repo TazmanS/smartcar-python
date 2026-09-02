@@ -1,8 +1,8 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class Detection(BaseModel):
-    class_name: str
+    class_: str = Field(alias="class")
     confidence: float
     left: float
     top: float
