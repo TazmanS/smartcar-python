@@ -1,0 +1,203 @@
+name: Build and publish python images
+
+on:
+  push:
+    branches:
+      - main
+      - dev
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  DOCKERHUB_USERNAME: tazmans
+  PYTHON_IMAGE_NAME: smartcar-python
+  S3_CV_BUCKET: smartcar-cv-models
+  AWS_REGION: eu-central-1
+
+jobs:
+  version:
+    name: Update version
+    runs-on: ubuntu-latest
+
+    outputs:
+      python_version: ${{ steps.version.outputs.python_version }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Update version
+        id: version
+        shell: bash
+        run: |
+          if [[ "${GITHUB_REF}" == "refs/heads/main" ]]; then
+            VERSION=$(cat VERSION)
+
+            IFS='.' read -r MAJOR MINOR PATCH <<< "$VERSION"
+            PATCH=$((PATCH + 1))
+
+            NEW_VERSION="${MAJOR}.${MINOR}.${PATCH}"
+
+            echo "$NEW_VERSION" > VERSION
+            echo "python_version=$NEW_VERSION" >> "$GITHUB_OUTPUT"
+
+          elif [[ "${GITHUB_REF}" == "refs/heads/dev" ]]; then
+            VERSION=$(cat DEV_VERSION)
+
+            IFS='.' read -r MAJOR MINOR PATCH <<< "$VERSION"
+            PATCH=$((PATCH + 1))
+
+            NEW_VERSION="${MAJOR}.${MINOR}.${PATCH}-dev"
+
+            VERSION_WITHOUT_DEV="${MAJOR}.${MINOR}.${PATCH}"
+            echo "$VERSION_WITHOUT_DEV" > DEV_VERSION
+
+            echo "python_version=$NEW_VERSION" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Upload version files
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-version
+          path: |
+            VERSION
+            DEV_VERSION
+          if-no-files-found: ignore
+
+  build:
+    name: Build and push Python image
+    needs: version
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Download YOLO model
+        run: |
+          aws s3 cp \
+            s3://${{ env.S3_CV_BUCKET }}/models/yolo11n.pt \
+            ./yolo11n.pt
+
+      - name: Setup QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_TOKEN }}
+
+      - name: Build and push Python image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          provenance: false
+          sbom: false
+          tags: |
+            ${{ env.DOCKERHUB_USERNAME }}/${{ env.PYTHON_IMAGE_NAME }}:${{ needs.version.outputs.python_version }}
+          cache-from: type=gha,scope=python
+          cache-to: type=gha,mode=max,scope=python
+
+  release:
+    name: Commit version
+    needs:
+      - version
+      - build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Download version files
+        uses: actions/download-artifact@v4
+        with:
+          name: python-version
+
+      - name: Commit version
+        run: |
+          if [[ "${GITHUB_REF}" == "refs/heads/main" ]]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+            git add VERSION
+            git commit -m "chore: bump python version [skip ci]" || exit 0
+            git push
+
+          elif [[ "${GITHUB_REF}" == "refs/heads/dev" ]]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+            git add DEV_VERSION
+            git commit -m "chore: bump python dev version [skip ci]" || exit 0
+            git push
+          fi
+
+  deploy:
+    name: Update deployment repository
+    needs:
+      - version
+      - release
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout deployment repository
+        uses: actions/checkout@v4
+        with:
+          repository: TazmanS/smartcar-devops
+          token: ${{ secrets.DEPLOYMENT_REPO_TOKEN }}
+
+      - name: Install yq
+        run: |
+          sudo wget -qO /usr/local/bin/yq \
+            https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
+          sudo chmod +x /usr/local/bin/yq
+
+      - name: Update production Python image
+        if: github.ref == 'refs/heads/main'
+        run: |
+          yq -i '
+            (.spec.template.spec.containers[] | select(.name == "python").image)
+            = "${{ env.DOCKERHUB_USERNAME }}/${{ env.PYTHON_IMAGE_NAME }}:${{ needs.version.outputs.python_version }}"
+          ' kubernetes/base/python/deployment.yaml
+
+      - name: Update dev Python image
+        if: github.ref == 'refs/heads/dev'
+        run: |
+          yq -i '
+            (.images[] | select(.name == "${{ env.DOCKERHUB_USERNAME }}/${{ env.PYTHON_IMAGE_NAME }}").newTag)
+            = "${{ needs.version.outputs.python_version }}"
+          ' kubernetes/overlays/dev/kustomization.yaml
+
+      - name: Commit and push deployment changes
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add kubernetes/base/python/deployment.yaml kubernetes/overlays/dev/kustomization.yaml
+
+          git commit -m "chore: update python image to ${{ needs.version.outputs.python_version }}" || exit 0
+
+          git push
