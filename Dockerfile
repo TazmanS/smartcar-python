@@ -12,7 +12,7 @@ RUN pip install --no-cache-dir \
 RUN pip install --no-cache-dir -r requirements.txt
 
 RUN pip uninstall -y opencv-python \
-  && pip install --no-cache-dir --no-deps opencv-python-headless
+  && pip install --no-cache-dir --force-reinstall opencv-python-headless
 
 COPY app ./app
 COPY yolo11n.pt .
