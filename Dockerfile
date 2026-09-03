@@ -9,7 +9,8 @@ RUN pip install --no-cache-dir \
   torchvision \
   --index-url https://download.pytorch.org/whl/cpu
 
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt \
+  && pip uninstall -y opencv-python
 
 COPY app ./app
 COPY yolo11n.pt .
