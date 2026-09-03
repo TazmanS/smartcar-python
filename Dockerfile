@@ -10,7 +10,8 @@ RUN pip install --no-cache-dir \
   --index-url https://download.pytorch.org/whl/cpu
 
 RUN pip install --no-cache-dir -r requirements.txt \
-  && pip uninstall -y opencv-python
+  && pip uninstall -y opencv-python \
+  && pip install --no-cache-dir opencv-python-headless
 
 COPY app ./app
 COPY yolo11n.pt .
