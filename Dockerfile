@@ -4,7 +4,15 @@ WORKDIR /app
 
 COPY requirements.txt .
 
+RUN pip install --no-cache-dir \
+  torch \
+  torchvision \
+  --index-url https://download.pytorch.org/whl/cpu
+
 RUN pip install --no-cache-dir -r requirements.txt
+
+RUN pip uninstall -y opencv-python \
+  && pip install --no-cache-dir --force-reinstall opencv-python-headless
 
 COPY app ./app
 COPY yolo11n.pt .
